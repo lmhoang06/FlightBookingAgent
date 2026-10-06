@@ -2,55 +2,94 @@
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from ..harness import Constraints
 from ..prompts import PLANNER_SYSTEM_PROMPT, REPLANNER_SYSTEM_PROMPT
-from .schemas import Plan, ReplannerOutput
+from .schemas import Plan, PlanStep, ReplannerOutput
 
 
 class Planner:
-    """Generates an initial plan of action based on the user's travel request."""
+    """Generates a complete step-by-step plan in one shot based on the user's travel request."""
 
     def __init__(self, llm):
         self.llm = llm
 
-    def plan(self, query: str):
-        """Generates a structured Plan."""
+    def plan_structured(self, query: str, constraints=None):
+        """Generates a structured Plan with tool names and arguments."""
+        c = constraints or Constraints()
         prompt = (
             f"{PLANNER_SYSTEM_PROMPT}\n\n"
-            f"User Goal: {query}\n\n"
-            "Produce the step-by-step plan."
+            f"User Goal: {query}\n"
+            f"Constraints: {c.to_prompt()}\n\n"
+            "Produce the complete step-by-step plan."
         )
         try:
             planner_llm = self.llm.with_structured_output(Plan)
             res = planner_llm.invoke(prompt)
-            if res and res.steps:
-                return [s.description for s in res.steps]
+            if isinstance(res, Plan) and res.steps:
+                return res
         except Exception:
             pass
 
-        # Fallback heuristic or direct text generation
-        res = self.llm.invoke(
-            [
-                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                HumanMessage(content=query),
+        # Deterministic slide-compliant fallback plan
+        return Plan(
+            steps=[
+                PlanStep(
+                    step_id=1,
+                    description=f"Search flights from {c.origin} to {c.destination} on {c.date}",
+                    tool="search_flights",
+                    tool_hint="search_flights",
+                    args={
+                        "origin": c.origin,
+                        "destination": c.destination,
+                        "departure_date": c.date,
+                        "adults": c.passenger_count,
+                        "trip_type": "ONE_WAY",
+                    },
+                ),
+                PlanStep(
+                    step_id=2,
+                    description=f"Book flight offer for passenger {c.passenger_name}",
+                    tool="create_flight_booking",
+                    tool_hint="create_flight_booking",
+                    args={
+                        "offer_id": "$offer_id",
+                        "contact_email": "passenger@example.com",
+                        "contact_phone": "0901234567",
+                    },
+                ),
             ]
         )
-        content = res.content if hasattr(res, "content") else str(res)
-        # Parse numbered list
-        steps = []
-        for line in content.splitlines():
-            line_str = line.strip()
-            if line_str and (line_str[0].isdigit() or line_str.startswith("-")):
-                cleaned = line_str.lstrip("0123456789.-) ")
-                if cleaned:
-                    steps.append(cleaned)
 
-        if not steps:
-            steps = [
-                f"Resolve airport codes and locations for request: {query}",
-                f"Search flight offers matching criteria for: {query}",
-                "Review offer details and summarize available flights",
-            ]
-        return steps
+    def plan(self, query: str):
+        """Generates a list of plan step descriptions (maintains legacy compatibility)."""
+        structured = self.plan_structured(query)
+        if structured and structured.steps:
+            return [s.description for s in structured.steps]
+
+        try:
+            res = self.llm.invoke(
+                [
+                    SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                    HumanMessage(content=query),
+                ]
+            )
+            content = res.content if hasattr(res, "content") else str(res)
+            steps = []
+            for line in content.splitlines():
+                line_str = line.strip()
+                if line_str and (line_str[0].isdigit() or line_str.startswith("-")):
+                    cleaned = line_str.lstrip("0123456789.-) ")
+                    if cleaned:
+                        steps.append(cleaned)
+            if steps:
+                return steps
+        except Exception:
+            pass
+
+        return [
+            f"Search flight offers matching criteria for: {query}",
+            f"Book best matching flight offer for: {query}",
+        ]
 
 
 class Replanner:
@@ -83,7 +122,6 @@ class Replanner:
         except Exception:
             pass
 
-        # Fallback: if remaining_steps is empty, complete with summary
         if not remaining_steps:
             return ReplannerOutput(
                 is_complete=True,
@@ -91,7 +129,6 @@ class Replanner:
                 remaining_steps=[],
             )
 
-        # Otherwise continue with next remaining steps
         return ReplannerOutput(
             is_complete=False,
             final_response="",

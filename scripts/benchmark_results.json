@@ -1,0 +1,171 @@
+{
+  "runs": [
+    {
+      "pattern": "react",
+      "scenario": "scenario_a",
+      "latency_sec": 0.0961,
+      "llm_calls": 3,
+      "total_tokens": 1044,
+      "is_done": true,
+      "compliance_pct": 100.0,
+      "stop_reason": "completed",
+      "has_valid_handoff": false,
+      "total_trace_steps": 4
+    },
+    {
+      "pattern": "react",
+      "scenario": "scenario_b",
+      "latency_sec": 0.0176,
+      "llm_calls": 3,
+      "total_tokens": 1044,
+      "is_done": false,
+      "compliance_pct": 100.0,
+      "stop_reason": "unachievable_goal",
+      "has_valid_handoff": true,
+      "total_trace_steps": 4
+    },
+    {
+      "pattern": "react",
+      "scenario": "scenario_c",
+      "latency_sec": 0.0142,
+      "llm_calls": 3,
+      "total_tokens": 1020,
+      "is_done": true,
+      "compliance_pct": 100.0,
+      "stop_reason": "completed",
+      "has_valid_handoff": false,
+      "total_trace_steps": 4
+    },
+    {
+      "pattern": "react",
+      "scenario": "scenario_d",
+      "latency_sec": 0.0102,
+      "llm_calls": 3,
+      "total_tokens": 980,
+      "is_done": false,
+      "compliance_pct": 100.0,
+      "stop_reason": "unachievable_goal",
+      "has_valid_handoff": true,
+      "total_trace_steps": 4
+    },
+    {
+      "pattern": "plan_then_execute",
+      "scenario": "scenario_a",
+      "latency_sec": 0.0017,
+      "llm_calls": 1,
+      "total_tokens": 404,
+      "is_done": true,
+      "compliance_pct": 100.0,
+      "stop_reason": "completed",
+      "has_valid_handoff": false,
+      "total_trace_steps": 7
+    },
+    {
+      "pattern": "plan_then_execute",
+      "scenario": "scenario_b",
+      "latency_sec": 0.0013,
+      "llm_calls": 1,
+      "total_tokens": 404,
+      "is_done": false,
+      "compliance_pct": 100.0,
+      "stop_reason": "unachievable_goal",
+      "has_valid_handoff": true,
+      "total_trace_steps": 7
+    },
+    {
+      "pattern": "plan_then_execute",
+      "scenario": "scenario_c",
+      "latency_sec": 0.0017,
+      "llm_calls": 1,
+      "total_tokens": 380,
+      "is_done": true,
+      "compliance_pct": 100.0,
+      "stop_reason": "completed",
+      "has_valid_handoff": false,
+      "total_trace_steps": 7
+    },
+    {
+      "pattern": "plan_then_execute",
+      "scenario": "scenario_d",
+      "latency_sec": 0.0009,
+      "llm_calls": 1,
+      "total_tokens": 340,
+      "is_done": false,
+      "compliance_pct": 100.0,
+      "stop_reason": "unachievable_goal",
+      "has_valid_handoff": true,
+      "total_trace_steps": 7
+    },
+    {
+      "pattern": "hybrid",
+      "scenario": "scenario_a",
+      "latency_sec": 0.0304,
+      "llm_calls": 8,
+      "total_tokens": 2644,
+      "is_done": true,
+      "compliance_pct": 100.0,
+      "stop_reason": "completed",
+      "has_valid_handoff": false,
+      "total_trace_steps": 21
+    },
+    {
+      "pattern": "hybrid",
+      "scenario": "scenario_b",
+      "latency_sec": 0.0291,
+      "llm_calls": 8,
+      "total_tokens": 2644,
+      "is_done": false,
+      "compliance_pct": 100.0,
+      "stop_reason": "unachievable_goal",
+      "has_valid_handoff": true,
+      "total_trace_steps": 21
+    },
+    {
+      "pattern": "hybrid",
+      "scenario": "scenario_c",
+      "latency_sec": 0.032,
+      "llm_calls": 8,
+      "total_tokens": 2620,
+      "is_done": true,
+      "compliance_pct": 100.0,
+      "stop_reason": "completed",
+      "has_valid_handoff": false,
+      "total_trace_steps": 21
+    },
+    {
+      "pattern": "hybrid",
+      "scenario": "scenario_d",
+      "latency_sec": 0.0304,
+      "llm_calls": 8,
+      "total_tokens": 2580,
+      "is_done": false,
+      "compliance_pct": 100.0,
+      "stop_reason": "unachievable_goal",
+      "has_valid_handoff": true,
+      "total_trace_steps": 21
+    }
+  ],
+  "summary": {
+    "react": {
+      "avg_latency": 0.0345,
+      "avg_llm_calls": 3.0,
+      "avg_tokens": 1022,
+      "scenario_a_success": true,
+      "avg_compliance": 100.0
+    },
+    "plan_then_execute": {
+      "avg_latency": 0.0014,
+      "avg_llm_calls": 1.0,
+      "avg_tokens": 382,
+      "scenario_a_success": true,
+      "avg_compliance": 100.0
+    },
+    "hybrid": {
+      "avg_latency": 0.0305,
+      "avg_llm_calls": 8.0,
+      "avg_tokens": 2622,
+      "scenario_a_success": true,
+      "avg_compliance": 100.0
+    }
+  }
+}

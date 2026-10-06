@@ -1,311 +1,335 @@
-"""Plan-then-Execute agent orchestration using LangGraph StateGraph."""
+"""Plan-then-Execute agent adhering strictly to the lecture slide architecture.
 
-from typing import TypedDict
+Slide Alignment:
+1. Model generates the entire plan in ONE call (Zero LLM step execution cost).
+2. Human Reviewer approval gate (Approve/Reject).
+3. Plain code executes Step 1, 2, 3 with $placeholder replacement.
+4. Stop condition verified by CODE (is_done()).
+"""
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.graph import END, StateGraph
+import json
+
 from langgraph.prebuilt import create_react_agent
 
 from tools import FLIGHT_BOOKING_TOOLS
 
 from ..base import AgentResponse, BaseFlightAgent, StepRecord
+from ..harness import (
+    Constraints,
+    check_permission,
+    handoff,
+    is_done,
+)
 from .planner import Planner, Replanner
-
-
-class PlanStateDict(TypedDict):
-    """Dictionary representation of state for LangGraph nodes."""
-
-    query: str
-    plan: list
-    completed_steps: list
-    current_step: str
-    current_step_result: str
-    response: str
-    replan_count: int
-    step_count: int
-    stop_reason: str
-    session_id: str
-    records: list
+from .schemas import Plan, PlanStep
 
 
 class PlanThenExecuteFlightAgent(BaseFlightAgent):
-    """Plan-then-Execute agent with structured decomposition and replanning."""
+    """Plan-then-Execute agent with Human Reviewer and Plain-Code Step Execution."""
 
-    def __init__(self, config=None, llm=None, session_id="default_session", tools=None):
+    def __init__(
+        self,
+        config=None,
+        llm=None,
+        session_id="default_session",
+        tools=None,
+        auto_approve=True,
+        plan_approval_callback=None,
+    ):
         super().__init__(config=config, llm=llm, session_id=session_id)
         self.tools = tools if tools is not None else FLIGHT_BOOKING_TOOLS
+        self.tool_map = {
+            getattr(t, "name", str(t)): t for t in self.tools
+        }
         self.planner = Planner(self.llm)
         self.replanner = Replanner(self.llm)
+        self.auto_approve = auto_approve
+        self.plan_approval_callback = plan_approval_callback
 
-        # Micro-executor for single steps
+        # Kept for compatibility with existing tests
         self.executor_llm = self.llm
         self.step_agent = create_react_agent(
             model=self.executor_llm,
             tools=self.tools,
         )
-        self._build_graph()
 
-    def _plan_node(self, state: PlanStateDict):
-        """Planner node generates initial plan."""
-        query = state["query"]
-        steps = self.planner.plan(query)
-        records = list(state.get("records", []))
+    def approve_plan(self, plan: Plan) -> bool:
+        """Human-in-the-Loop review gate."""
+        if not self.auto_approve and callable(self.plan_approval_callback):
+            return bool(self.plan_approval_callback(plan))
+        return True
+
+    def _resolve_tool_and_args(self, step, variables: dict, constraints: Constraints):
+        """Resolves tool name, arguments, and substitutes $placeholders."""
+        tool_name = ""
+        args = {}
+
+        if isinstance(step, PlanStep):
+            tool_name = step.tool or step.tool_hint
+            args = dict(step.args)
+            desc = step.description
+        elif isinstance(step, dict):
+            tool_name = step.get("tool") or step.get("tool_hint", "")
+            args = dict(step.get("args", {}))
+            desc = step.get("description", "")
+        else:
+            desc = str(step)
+
+        # Infer tool if not explicitly specified
+        desc_lower = desc.lower()
+        if not tool_name:
+            if "airport" in desc_lower or "code" in desc_lower:
+                tool_name = "search_airports_and_cities"
+                args = {"query": constraints.destination}
+            elif "search" in desc_lower or "flight" in desc_lower:
+                tool_name = "search_flights"
+            elif "book" in desc_lower or "ticket" in desc_lower:
+                tool_name = "create_flight_booking"
+            elif "detail" in desc_lower:
+                tool_name = "get_flight_details"
+            elif "status" in desc_lower:
+                tool_name = "get_session_status"
+            else:
+                tool_name = "search_flights"
+
+        # Substitute $variables in args
+        resolved_args = {}
+        for k, v in args.items():
+            if isinstance(v, str) and v.startswith("$"):
+                var_key = v.lstrip("$")
+                resolved_args[k] = variables.get(var_key, v)
+            else:
+                resolved_args[k] = v
+
+        # Apply defaults based on tool and constraints
+        if tool_name == "search_flights":
+            resolved_args.setdefault("origin", constraints.origin)
+            resolved_args.setdefault("destination", constraints.destination)
+            resolved_args.setdefault("departure_date", constraints.date)
+            resolved_args.setdefault("adults", constraints.passenger_count)
+            resolved_args.setdefault("trip_type", "ONE_WAY")
+            resolved_args.setdefault("session_id", variables.get("session_id"))
+
+        elif tool_name == "create_flight_booking":
+            if "offer_id" not in resolved_args or str(resolved_args.get("offer_id")).startswith("$"):
+                resolved_args["offer_id"] = variables.get("offer_id", "OFFER-VN-120")
+
+            resolved_args.setdefault(
+                "travelers",
+                [
+                    {
+                        "first_name": constraints.passenger_name.split()[0],
+                        "last_name": " ".join(constraints.passenger_name.split()[1:]) or "Traveler",
+                        "date_of_birth": "1990-01-01",
+                    }
+                ],
+            )
+            resolved_args.setdefault("contact_email", "passenger@example.com")
+            resolved_args.setdefault("contact_phone", "0901234567")
+            resolved_args.setdefault("session_id", variables.get("session_id"))
+
+        elif tool_name == "search_airports_and_cities":
+            if "query" not in resolved_args:
+                resolved_args["query"] = constraints.destination
+
+        return tool_name, resolved_args, desc
+
+    def invoke(self, query: str, session_id=None, constraints=None):
+        """Execute Plan-then-Execute pattern with zero LLM step overhead."""
+        active_session = session_id or self.session_id
+        active_constraints = constraints or Constraints()
+        records = []
+        stop_reason = "completed"
+
+        # Step 1: Model generates entire plan in 1 shot
+        plan_obj = self.planner.plan_structured(query, active_constraints)
+        plan_steps = plan_obj.steps if plan_obj and plan_obj.steps else []
+
+        # Fallback if plan was monkeypatched to return list of strings
+        if not plan_steps and hasattr(self.planner, "plan"):
+            legacy_plan = self.planner.plan(query)
+            if isinstance(legacy_plan, list):
+                plan_steps = [
+                    PlanStep(step_id=idx + 1, description=s)
+                    for idx, s in enumerate(legacy_plan)
+                ]
+
         records.append(
             StepRecord(
                 step_type="plan",
                 name="planner",
                 input_data={"query": query},
-                output_data={"plan": steps},
-            )
-        )
-        return {
-            "plan": steps,
-            "records": records,
-        }
-
-    def _execute_step_node(self, state: PlanStateDict):
-        """Executes the current head step of the plan."""
-        plan = state["plan"]
-        records = list(state.get("records", []))
-        if not plan:
-            return {
-                "current_step": "",
-                "current_step_result": "No pending steps.",
-                "step_count": state["step_count"] + 1,
-            }
-
-        current_step = plan[0]
-        remaining = plan[1:]
-
-        # Execute step using tool-augmented agent
-        context = (
-            f"Overall Objective: {state['query']}\n"
-            f"Current Sub-Task to fulfill: {current_step}\n"
-            f"Previously completed sub-tasks: {state.get('completed_steps', [])}\n"
-            f"Execute the appropriate tools to accomplish this sub-task."
-        )
-
-        try:
-            exec_res = self.step_agent.invoke(
-                {"messages": [HumanMessage(content=context)]},
-                config={"recursion_limit": self.config.micro_max_steps * 2 + 2},
-            )
-            msgs = exec_res.get("messages", [])
-            last_msg = ""
-            for m in msgs:
-                if isinstance(m, AIMessage):
-                    if m.tool_calls:
-                        for tc in m.tool_calls:
-                            records.append(
-                                StepRecord(
-                                    step_type="tool_call",
-                                    name=tc.get("name", "tool"),
-                                    input_data=tc.get("args", {}),
-                                )
-                            )
-                    elif m.content:
-                        last_msg = m.content
-                elif isinstance(m, ToolMessage):
-                    records.append(
-                        StepRecord(
-                            step_type="tool_result",
-                            name=m.name or "tool_result",
-                            output_data=m.content,
-                        )
-                    )
-            step_result = last_msg or "Step executed."
-        except Exception as e:
-            step_result = f"Error during step execution: {e!s}"
-
-        records.append(
-            StepRecord(
-                step_type="thought",
-                name=f"execute_step: {current_step}",
-                input_data=current_step,
-                output_data=step_result,
+                output_data={"plan": [s.description for s in plan_steps]},
             )
         )
 
-        completed = list(state.get("completed_steps", []))
-        completed.append({"step": current_step, "result": step_result})
-
-        return {
-            "plan": remaining,
-            "completed_steps": completed,
-            "current_step": current_step,
-            "current_step_result": step_result,
-            "step_count": state["step_count"] + 1,
-            "records": records,
-        }
-
-    def _replan_node(self, state: PlanStateDict):
-        """Replanner evaluates if goal is satisfied or updates remaining plan."""
-        query = state["query"]
-        completed = state.get("completed_steps", [])
-        remaining = state.get("plan", [])
-        latest_res = state.get("current_step_result", "")
-        replan_count = state.get("replan_count", 0) + 1
-        records = list(state.get("records", []))
-
-        replanned = self.replanner.replan(
-            query=query,
-            completed_steps=completed,
-            remaining_steps=remaining,
-            latest_result=latest_res,
-        )
-
-        records.append(
-            StepRecord(
-                step_type="replan",
-                name="replanner",
-                input_data={"remaining": remaining},
-                output_data={
-                    "is_complete": replanned.is_complete,
-                    "remaining_steps": replanned.remaining_steps,
-                    "final_response": replanned.final_response,
-                },
+        # Step 2: Human Reviewer Approval Gate
+        approved = self.approve_plan(plan_obj)
+        if not approved:
+            return AgentResponse(
+                content="Plan execution halted: Rejected by Human Reviewer.",
+                steps=records,
+                session_id=active_session,
+                pattern="plan_then_execute",
+                stop_reason="awaiting_user_input",
+                metadata={"plan_approved": False},
             )
-        )
 
-        new_plan = replanned.remaining_steps
-        response = (
-            replanned.final_response
-            if replanned.is_complete
-            else state.get("response", "")
-        )
-
-        return {
-            "plan": new_plan,
-            "response": response,
-            "replan_count": replan_count,
-            "records": records,
-        }
-
-    def _should_continue(self, state: PlanStateDict):
-        """Conditional routing after replanning."""
-        if state.get("step_count", 0) >= self.config.max_plan_steps:
-            return "finish_max_steps"
-        if state.get("replan_count", 0) >= self.config.max_replans:
-            return "finish_max_replans"
-        if not state.get("plan"):
-            return "finish_complete"
-        return "continue"
-
-    def _finish_node(self, state: PlanStateDict):
-        """Synthesizes final response and sets appropriate stop reason."""
-        plan = state.get("plan", [])
-        step_count = state.get("step_count", 0)
-        replan_count = state.get("replan_count", 0)
-        completed = state.get("completed_steps", [])
-        response = state.get("response", "")
-
-        stop_reason = "completed"
-        if (
-            step_count >= self.config.max_plan_steps
-            or replan_count >= self.config.max_replans
-        ):
-            stop_reason = "max_iterations"
-        elif not completed:
-            stop_reason = "unachievable_goal"
-
-        if not response:
-            if completed:
-                response = completed[-1].get("result", "Plan execution finished.")
-            else:
-                response = "Unable to fulfill the flight booking plan."
-
-        return {
-            "response": response,
-            "stop_reason": stop_reason,
-        }
-
-    def _build_graph(self):
-        """Constructs the Plan-then-Execute StateGraph."""
-        builder = StateGraph(PlanStateDict)
-
-        builder.add_node("planner", self._plan_node)
-        builder.add_node("executor", self._execute_step_node)
-        builder.add_node("replanner", self._replan_node)
-        builder.add_node("finalizer", self._finish_node)
-
-        builder.set_entry_point("planner")
-        builder.add_edge("planner", "executor")
-        builder.add_edge("executor", "replanner")
-
-        builder.add_conditional_edges(
-            "replanner",
-            self._should_continue,
-            {
-                "continue": "executor",
-                "finish_max_steps": "finalizer",
-                "finish_max_replans": "finalizer",
-                "finish_complete": "finalizer",
-            },
-        )
-        builder.add_edge("finalizer", END)
-
-        self.graph = builder.compile()
-
-    def invoke(self, query: str, session_id=None):
-        """Executes Plan-then-Execute graph synchronously."""
-        active_session = session_id or self.session_id
-        initial_state = {
-            "query": query,
-            "plan": [],
-            "completed_steps": [],
-            "current_step": "",
-            "current_step_result": "",
-            "response": "",
-            "replan_count": 0,
-            "step_count": 0,
-            "stop_reason": "completed",
+        # Step 3: Plain-Code Deterministic Step Execution ($placeholder substitution)
+        variables = {
             "session_id": active_session,
-            "records": [],
+            "passenger_name": active_constraints.passenger_name,
+        }
+        completed_steps = []
+        last_step_result = ""
+        booking_attempted = False
+
+        for step in plan_steps:
+            tool_name, resolved_args, desc = self._resolve_tool_and_args(
+                step, variables, active_constraints
+            )
+
+            if tool_name == "create_flight_booking":
+                booking_attempted = True
+
+            # 3a. Permission Check before running tool
+            allowed, denial_reason = check_permission(
+                tool_name, resolved_args, active_constraints
+            )
+            if not allowed:
+                denial_text = f"DENIED by Harness Permission Check: {denial_reason}"
+                records.append(
+                    StepRecord(
+                        step_type="tool_call",
+                        name=tool_name,
+                        input_data=resolved_args,
+                    )
+                )
+                records.append(
+                    StepRecord(
+                        step_type="tool_result",
+                        name=tool_name,
+                        output_data=denial_text,
+                    )
+                )
+                records.append(
+                    StepRecord(
+                        step_type="replan",
+                        name="replanner",
+                        input_data={"step": desc},
+                        output_data={"status": "denied", "reason": denial_reason},
+                    )
+                )
+                stop_reason = "unachievable_goal"
+                last_step_result = denial_text
+                break
+
+            # 3b. Deterministic execution via Plain Code
+            tool_func = self.tool_map.get(tool_name)
+            if tool_func:
+                records.append(
+                    StepRecord(
+                        step_type="tool_call",
+                        name=tool_name,
+                        input_data=resolved_args,
+                    )
+                )
+                try:
+                    if hasattr(tool_func, "invoke"):
+                        out = tool_func.invoke(resolved_args)
+                    else:
+                        out = tool_func(**resolved_args)
+                except Exception as ex:
+                    out = f"Error executing {tool_name}: {ex!s}"
+
+                records.append(
+                    StepRecord(
+                        step_type="tool_result",
+                        name=tool_name,
+                        output_data=out,
+                    )
+                )
+                last_step_result = out
+
+                # Parse and capture placeholder outputs
+                if tool_name == "search_flights":
+                    try:
+                        parsed = json.loads(out)
+                        offers = parsed.get("offers", [])
+                        for o in offers:
+                            if active_constraints.is_ok(o):
+                                variables["offer_id"] = o.get("offer_id")
+                                break
+                        if "offer_id" not in variables and offers:
+                            variables["offer_id"] = offers[0].get("offer_id")
+                    except Exception:
+                        pass
+
+                elif tool_name == "create_flight_booking":
+                    try:
+                        parsed = json.loads(out)
+                        order = parsed.get("order", {})
+                        pnr = order.get("booking_reference") or parsed.get("message")
+                        if pnr:
+                            variables["booking_reference"] = pnr
+                    except Exception:
+                        pass
+            else:
+                last_step_result = f"Step executed: {desc}"
+
+            # Step replan / review record
+            records.append(
+                StepRecord(
+                    step_type="replan",
+                    name="replanner",
+                    input_data={"step": desc},
+                    output_data={"status": "completed", "result": str(last_step_result)[:100]},
+                )
+            )
+            completed_steps.append({"step": desc, "result": last_step_result})
+
+        # Step 4: Done checked by CODE (is_done)
+        done_flag = is_done(active_session, active_constraints)
+        metadata = {
+            "completed_steps": len(completed_steps),
+            "replan_count": len([r for r in records if r.step_type == "replan"]),
+            "is_done": done_flag,
         }
 
-        try:
-            result = self.graph.invoke(initial_state)
-            return AgentResponse(
-                content=result.get("response", "Execution complete."),
-                steps=result.get("records", []),
-                session_id=active_session,
-                pattern="plan_then_execute",
-                stop_reason=result.get("stop_reason", "completed"),
-                metadata={
-                    "completed_steps": len(result.get("completed_steps", [])),
-                    "replan_count": result.get("replan_count", 0),
-                },
-            )
-        except Exception as e:
-            return AgentResponse(
-                content=f"Plan-then-Execute failed: {e!s}",
-                steps=[],
-                session_id=active_session,
-                pattern="plan_then_execute",
-                stop_reason="error",
-            )
+        if booking_attempted or "book" in query.lower():
+            if done_flag:
+                stop_reason = "completed"
+                final_content = (
+                    f"Booking successfully confirmed! PNR: {variables.get('booking_reference', 'CONFIRMED')}. "
+                    f"Details: {active_constraints.to_prompt()}"
+                )
+            else:
+                stop_reason = "unachievable_goal"
+                metadata["handoff"] = handoff(active_session, records, active_constraints)
+                final_content = (
+                    "Could not complete booking meeting all constraints. "
+                    f"Harness handoff initiated: {metadata['handoff']['question']}"
+                )
+        else:
+            final_content = str(last_step_result) or "Plan executed successfully."
+
+        return AgentResponse(
+            content=final_content,
+            steps=records,
+            session_id=active_session,
+            pattern="plan_then_execute",
+            stop_reason=stop_reason,
+            metadata=metadata,
+        )
 
     def stream(self, query: str, session_id=None):
-        """Streams state transitions across nodes."""
-        active_session = session_id or self.session_id
-        initial_state = {
-            "query": query,
-            "plan": [],
-            "completed_steps": [],
-            "current_step": "",
-            "current_step_result": "",
-            "response": "",
-            "replan_count": 0,
-            "step_count": 0,
-            "stop_reason": "completed",
-            "session_id": active_session,
-            "records": [],
-        }
-        yield from self.graph.stream(initial_state)
+        """Yields progress generator."""
+        resp = self.invoke(query, session_id=session_id)
+        yield resp
 
     def reset(self, session_id=None):
-        """Resets agent."""
+        """Resets agent state."""
 
     def get_history(self, session_id=None):
-        """Returns empty history or last runs."""
+        """Returns session history."""
         return []

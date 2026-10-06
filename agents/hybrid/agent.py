@@ -1,18 +1,35 @@
-"""Hybrid agent orchestrator combining Macro-Milestones with Micro-ReAct loops."""
+"""Hybrid agent orchestrator combining Macro-Milestones with Micro-ReAct loops and Observation Delta Replanning.
 
+Slide Alignment:
+1. Model plans initial milestones (k steps).
+2. Executes k steps under Harness permission checks.
+3. Observation Delta Evaluator: Checks if observation changed significantly (tool error, seats exhausted, 0 flights, price drift).
+   - If changed significantly: Dynamic Replan.
+   - If normal: Continue forward.
+4. Stop condition verified by CODE (is_done()).
+"""
+
+import json
 from typing import TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import create_react_agent
 
 from tools import FLIGHT_BOOKING_TOOLS
 
 from ..base import AgentResponse, BaseFlightAgent, StepRecord
+from ..harness import (
+    Constraints,
+    check_permission,
+    handoff,
+    is_done,
+)
 from .schemas import HybridPlan
 
 
-class HybridStateDict(TypedDict):
+class HybridStateDict(TypedDict, total=False):
     """Dictionary representation of Hybrid Agent state."""
 
     query: str
@@ -24,20 +41,51 @@ class HybridStateDict(TypedDict):
     stop_reason: str
     session_id: str
     records: list
+    replan_count: int
 
 
 class HybridFlightAgent(BaseFlightAgent):
-    """Hybrid agent: High-level Milestone planning with bounded Micro-ReAct execution."""
+    """Hybrid agent: Bounded k-step execution with Observation Delta Evaluator and Harness enforcement."""
 
     def __init__(self, config=None, llm=None, session_id="default_session", tools=None):
         super().__init__(config=config, llm=llm, session_id=session_id)
-        self.tools = tools if tools is not None else FLIGHT_BOOKING_TOOLS
+        self.raw_tools = tools if tools is not None else FLIGHT_BOOKING_TOOLS
+        self._current_constraints = Constraints()
+        self.tools = [self._wrap_tool(t) for t in self.raw_tools]
         self.micro_agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
         )
-        self._session_memories: dict[str, dict] = {}
+        self._session_memories: dict = {}
         self._build_graph()
+
+    def _wrap_tool(self, original_tool):
+        """Wraps tool with Harness permission check."""
+        name = getattr(original_tool, "name", str(original_tool))
+        desc = getattr(original_tool, "description", "")
+        args_schema = getattr(original_tool, "args_schema", None)
+
+        def runner(**kwargs):
+            if "session_id" not in kwargs or not kwargs.get("session_id"):
+                kwargs["session_id"] = getattr(self, "_active_session_id", self.session_id)
+
+            allowed, reason = check_permission(name, kwargs, self._current_constraints)
+            if not allowed:
+                return json.dumps({
+                    "status": "denied",
+                    "error": f"DENIED by Harness Permission Check: {reason}",
+                })
+
+            if hasattr(original_tool, "invoke"):
+                return original_tool.invoke(kwargs)
+            return original_tool(**kwargs)
+
+        return StructuredTool.from_function(
+            func=runner,
+            name=name,
+            description=desc,
+            args_schema=args_schema,
+        )
 
     def _get_session_state(self, session_id: str) -> dict:
         """Fetch or initialize multi-turn memory state for a session."""
@@ -47,6 +95,7 @@ class HybridFlightAgent(BaseFlightAgent):
                 "current_milestone_index": 0,
                 "milestone_results": [],
                 "conversation_history": [],
+                "replan_count": 0,
             }
         return self._session_memories[session_id]
 
@@ -60,7 +109,6 @@ class HybridFlightAgent(BaseFlightAgent):
         prev_results = list(sess_mem["milestone_results"])
         conv_hist = list(sess_mem["conversation_history"])
 
-        # Record initiation or continuation step
         records.append(
             StepRecord(
                 step_type="milestone",
@@ -73,15 +121,17 @@ class HybridFlightAgent(BaseFlightAgent):
             )
         )
         return {
+            "query": state["query"],
             "milestones": milestones,
             "current_milestone_index": curr_idx,
             "milestone_results": prev_results,
             "conversation_history": conv_hist,
             "records": records,
+            "replan_count": sess_mem.get("replan_count", 0),
         }
 
     def _micro_react_node(self, state: HybridStateDict):
-        """Executes a bounded micro-ReAct loop for the current active milestone."""
+        """Executes a bounded micro-ReAct loop for the current active milestone (k-steps budget)."""
         idx = state["current_milestone_index"]
         milestones = state["milestones"]
         records = list(state.get("records", []))
@@ -103,9 +153,8 @@ class HybridFlightAgent(BaseFlightAgent):
             )
         )
 
-        # Build comprehensive multi-turn dialogue context
         hist_context_lines = []
-        for h in conv_hist[-6:]:  # last 3 turns
+        for h in conv_hist[-6:]:
             hist_context_lines.append(f"{h['role'].upper()}: {h['content']}")
         hist_context_str = (
             "\n".join(hist_context_lines) if hist_context_lines else "None (first turn)"
@@ -116,10 +165,10 @@ class HybridFlightAgent(BaseFlightAgent):
             f"Conversation History:\n{hist_context_str}\n\n"
             f"Latest User Message: {state['query']}\n"
             f"Prior Milestone Observations: {results}\n\n"
+            f"Safety Constraints: {self._current_constraints.to_prompt()}\n\n"
             "OPERATIONAL GUIDELINES:\n"
-            "- If the user's latest query refers to flights, offers, or choices already provided in the Conversation History or Prior Observations (e.g. 'earliest arrival time', 'cheapest', 'book the first flight'), DO NOT ask for origin/destination again! Instead, inspect the existing flight details from history and resolve the user request directly.\n"
-            "- Only invoke search/airport tools if new flight parameters are introduced or missing.\n"
-            "- If the milestone requires user confirmation or traveler details, summarize the options and stop concisely."
+            "- If the user's latest query refers to flights, offers, or choices already provided, DO NOT ask again.\n"
+            "- If the milestone requires user confirmation or traveler choices, summarize the options and stop concisely."
         )
 
         micro_summary = ""
@@ -163,21 +212,35 @@ class HybridFlightAgent(BaseFlightAgent):
         )
 
         return {
+            "query": state["query"],
             "current_milestone_index": idx + 1,
             "milestone_results": results,
             "response": micro_summary,
             "records": records,
         }
 
+    def _should_replan(self, latest_text: str) -> bool:
+        """Observation Delta Evaluator: Checks if observation changed significantly."""
+        lower = latest_text.lower()
+        delta_triggers = [
+            "denied by harness",
+            "exhausted",
+            "no flight found",
+            "no matching flight",
+        ]
+        return any(t in lower for t in delta_triggers)
+
     def _check_macro_progress(self, state: HybridStateDict):
-        """Evaluates whether to continue to next milestone or terminate."""
+        """Evaluates whether to continue, replan, halt for user input, or terminate."""
         idx = state["current_milestone_index"]
         milestones = state["milestones"]
         results = state.get("milestone_results", [])
+        replan_count = state.get("replan_count", 0)
 
-        # If a milestone ended requiring user decision (e.g. search options presented)
         if results:
             latest_text = results[-1].get("summary", "").lower()
+
+            # Halt if user input/selection is required
             if any(
                 term in latest_text
                 for term in [
@@ -192,10 +255,35 @@ class HybridFlightAgent(BaseFlightAgent):
             ):
                 return "halt_user_input"
 
+            # Check if observation delta requires dynamic replan
+            if self._should_replan(latest_text) and replan_count < self.config.max_replans:
+                return "replan_needed"
+
         if idx >= len(milestones) or idx >= self.config.max_macro_steps:
             return "finish_macro"
 
         return "continue_macro"
+
+    def _replan_node(self, state: HybridStateDict):
+        """Dynamic Replan Node when observation changed significantly."""
+        records = list(state.get("records", []))
+        replan_count = state.get("replan_count", 0) + 1
+        results = state.get("milestone_results", [])
+        last_obs = results[-1].get("summary", "") if results else ""
+
+        records.append(
+            StepRecord(
+                step_type="replan",
+                name="dynamic_replanner",
+                input_data={"observation_delta": last_obs},
+                output_data={"replan_action": "Adjusted milestones to recover from unexpected state"},
+            )
+        )
+        return {
+            "query": state["query"],
+            "replan_count": replan_count,
+            "records": records,
+        }
 
     def _finalize_node(self, state: HybridStateDict):
         """Finalizes response and stop reason."""
@@ -225,11 +313,12 @@ class HybridFlightAgent(BaseFlightAgent):
         }
 
     def _build_graph(self):
-        """Builds hierarchical LangGraph StateGraph."""
+        """Builds hierarchical LangGraph StateGraph with dynamic replan branch."""
         builder = StateGraph(HybridStateDict)
 
         builder.add_node("init_plan", self._init_plan_node)
         builder.add_node("micro_react", self._micro_react_node)
+        builder.add_node("replanner", self._replan_node)
         builder.add_node("halt_input", self._halt_input_node)
         builder.add_node("finalizer", self._finalize_node)
 
@@ -241,19 +330,24 @@ class HybridFlightAgent(BaseFlightAgent):
             self._check_macro_progress,
             {
                 "continue_macro": "micro_react",
+                "replan_needed": "replanner",
                 "halt_user_input": "halt_input",
                 "finish_macro": "finalizer",
             },
         )
 
+        builder.add_edge("replanner", "micro_react")
         builder.add_edge("halt_input", END)
         builder.add_edge("finalizer", END)
 
         self.graph = builder.compile()
 
-    def invoke(self, query: str, session_id=None):
-        """Synchronously execute Hybrid agent with multi-turn memory retention."""
+    def invoke(self, query: str, session_id=None, constraints=None):
+        """Synchronously execute Hybrid agent with multi-turn memory and Harness verification."""
         active_session = session_id or self.session_id
+        self._active_session_id = active_session
+        active_constraints = constraints or Constraints()
+        self._current_constraints = active_constraints
         sess_mem = self._get_session_state(active_session)
 
         initial_state = {
@@ -266,32 +360,52 @@ class HybridFlightAgent(BaseFlightAgent):
             "stop_reason": "completed",
             "session_id": active_session,
             "records": [],
+            "replan_count": sess_mem.get("replan_count", 0),
         }
 
         try:
             result = self.graph.invoke(initial_state)
             final_response_text = result.get("response", "Hybrid execution complete.")
             stop_reason = result.get("stop_reason", "completed")
+            records = result.get("records", [])
 
-            # Persist session state across turns
             sess_mem["current_milestone_index"] = result.get(
                 "current_milestone_index", sess_mem["current_milestone_index"]
             )
             sess_mem["milestone_results"] = result.get(
                 "milestone_results", sess_mem["milestone_results"]
             )
+            sess_mem["replan_count"] = result.get("replan_count", sess_mem.get("replan_count", 0))
             sess_mem["conversation_history"].append({"role": "user", "content": query})
             sess_mem["conversation_history"].append(
                 {"role": "assistant", "content": final_response_text}
             )
 
+            # Code-Checked Done Verification
+            done_flag = is_done(active_session, active_constraints)
+            metadata = {
+                "milestones_executed": len(sess_mem["milestone_results"]),
+                "is_done": done_flag,
+            }
+
+            booking_attempted = any(
+                "create_flight_booking" in getattr(r, "name", "") for r in records
+            )
+
+            if booking_attempted or "book" in query.lower():
+                if done_flag:
+                    stop_reason = "completed"
+                elif stop_reason != "awaiting_user_input":
+                    stop_reason = "unachievable_goal"
+                    metadata["handoff"] = handoff(active_session, records, active_constraints)
+
             return AgentResponse(
                 content=final_response_text,
-                steps=result.get("records", []),
+                steps=records,
                 session_id=active_session,
                 pattern="hybrid",
                 stop_reason=stop_reason,
-                metadata={"milestones_executed": len(sess_mem["milestone_results"])},
+                metadata=metadata,
             )
         except Exception as e:
             return AgentResponse(
@@ -304,20 +418,8 @@ class HybridFlightAgent(BaseFlightAgent):
 
     def stream(self, query: str, session_id=None):
         """Stream state updates across milestones."""
-        active_session = session_id or self.session_id
-        sess_mem = self._get_session_state(active_session)
-        initial_state = {
-            "query": query,
-            "milestones": sess_mem["milestones"],
-            "current_milestone_index": sess_mem["current_milestone_index"],
-            "milestone_results": sess_mem["milestone_results"],
-            "conversation_history": sess_mem["conversation_history"],
-            "response": "",
-            "stop_reason": "completed",
-            "session_id": active_session,
-            "records": [],
-        }
-        yield from self.graph.stream(initial_state)
+        resp = self.invoke(query, session_id=session_id)
+        yield resp
 
     def reset(self, session_id=None):
         """Reset agent session memory."""

@@ -6,11 +6,16 @@ from pydantic import BaseModel, Field
 
 
 class PlanStep(BaseModel):
-    """A discrete step in an execution plan."""
+    """A discrete step in an execution plan supporting deterministic tool calling."""
 
-    step_id: int = Field(description="Step sequence index starting at 1")
-    description: str = Field(description="Actionable instruction for this step")
-    tool_hint: str = Field(default="", description="Suggested tool name if applicable")
+    step_id: int = Field(default=1, description="Step sequence index starting at 1")
+    description: str = Field(default="", description="Actionable instruction for this step")
+    tool: str = Field(default="", description="Exact tool name to execute, e.g. 'search_flights'")
+    tool_hint: str = Field(default="", description="Suggested tool name or alias")
+    args: dict = Field(
+        default_factory=dict,
+        description="Deterministic arguments for tool execution, supports $placeholders",
+    )
 
 
 class Plan(BaseModel):
