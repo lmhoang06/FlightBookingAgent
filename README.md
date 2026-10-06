@@ -1,7 +1,7 @@
 # FlightBookingAgent ✈️
 
 > **Hệ Thống Đặt Vé Máy Bay Thông Minh với Kiến Trúc Khung Kiềm Tỏa (4-Layer Harness) và Chuẩn Hóa 3 Mẫu Thiết Kế Agent (ReAct, Plan-then-Execute, Hybrid)**  
-> *Đồ án thực hành môn học: SE373 - Kỹ nghệ Tri thức (Knowledge Engineering)*
+> *Đồ án thực hành môn học: SE373 - Kỹ thuật xây dựng hệ thống Agentic AI*
 
 ---
 
@@ -9,13 +9,12 @@
 
 | Mục / Field | Thông tin chi tiết / Details |
 | :--- | :--- |
-| **Họ và tên / Full Name** | `[HỌ VÀ TÊN SINH VIÊN / STUDENT FULL NAME]` |
-| **Mã số sinh viên / Student ID** | `[MSSV / STUDENT ID]` |
-| **Lớp / Class** | `[LỚP SINH HOẠT / CLASS]` |
-| **Môn học / Course** | SE373 - Kỹ nghệ Tri thức (Knowledge Engineering) |
-| **Giảng viên hướng dẫn / Instructor** | `[HỌ VÀ TÊN GIẢNG VIÊN / INSTRUCTOR NAME]` |
+| **Họ và tên / Full Name** | `LÊ MINH HOÀNG` |
+| **Mã số sinh viên / Student ID** | `24520542` |
+| **Lớp / Class** | `KHMT2024.2` |
+| **Môn học / Course** | SE373 - Kỹ thuật xây dựng hệ thống Agentic AI |
 | **Đơn vị đào tạo / Institution** | Trường Đại học Công nghệ Thông tin - ĐHQG-HCM (UIT - VNU-HCM) |
-| **Email liên hệ / Contact** | `[EMAIL SINH VIÊN / STUDENT EMAIL]` |
+| **Email liên hệ / Contact** | `24520542@gm.uit.edu.vn` |
 | **Repository URL** | [https://github.com/lmhoang06/FlightBookingAgent](https://github.com/lmhoang06/FlightBookingAgent) |
 
 ---
@@ -28,7 +27,7 @@
 ### Chi tiết phạm vi hỗ trợ và xử lý sai lệch (Discrepancy Resolution):
 1. **Rà soát kiến trúc & Đối soát yêu cầu (Architectural Audit)**:
    - Ban đầu, mã nguồn gốc tồn tại một số điểm chưa đồng bộ tuyệt đối với các tiêu chuẩn trong bài giảng lý thuyết (ví dụ: thiếu bộ chặn quyền tập trung `PermissionInterceptor`, tiêu chuẩn dừng còn phụ thuộc vào phán đoán văn bản của LLM thay vì xác thực trực tiếp cơ sở dữ liệu bằng mã lệnh code, và cơ chế lập kế hoạch chưa phân tách rõ bước Human Approval).
-   - Mô hình Gemini được sử dụng để phân tích chênh lệch (discrepancy analysis), đề xuất kế hoạch tái cấu trúc chi tiết được lập thành tài liệu chuẩn tại [`PLAN.md`](./PLAN.md).
+   - Mô hình Gemini được sử dụng để phân tích chênh lệch (discrepancy analysis), đề xuất kế hoạch tái cấu trúc chi tiết và chuẩn hóa kiến trúc được ghi nhận toàn diện tại [`REPORT.md`](./REPORT.md).
 2. **Hiện thực hóa 4 Tầng Harness & 3 Mẫu Agent**:
    - Hỗ trợ xây dựng khung rào chắn bảo vệ [`agents/harness.py`](./agents/harness.py) với 4 tầng: *Constraints as DATA*, *Permission Check*, *Code-based is_done*, và *Human Handoff*.
    - Hoàn thiện 3 mẫu thiết kế Agent theo đúng bài giảng:
@@ -152,7 +151,6 @@ FlightBookingAgent/
 │   └── benchmark_results.json      # Kết quả đo lường thực nghiệm
 ├── app.py                          # Giao diện trực quan Streamlit tương tác
 ├── requirements.txt                # Danh sách thư viện phụ thuộc
-├── PLAN.md                         # Kế hoạch chi tiết tái cấu trúc theo bài giảng
 ├── REPORT.md                       # Báo cáo kỹ thuật phân tích chuyên sâu
 └── README.md                       # Tài liệu hướng dẫn sử dụng & thông tin đồ án
 ```
@@ -214,6 +212,5 @@ Kịch bản đánh giá sẽ tự động chạy qua 4 tình huống với cả
 
 ---
 
-## 📚 Tài Liệu Tham Khảo (Documentation)
-- [`PLAN.md`](./PLAN.md): Bản kế hoạch chi tiết, kiến trúc chuẩn hóa theo slide bài giảng.
-- [`REPORT.md`](./REPORT.md): Báo cáo kỹ thuật song ngữ chi tiết (Kiến trúc 4 tầng, cơ chế giảm thiểu 4 lỗi, và phân tích thực nghiệm).
+## 📚 Tài Liệu Báo Cáo Kỹ Thuật (Technical Documentation)
+- [`REPORT.md`](./REPORT.md): Báo cáo kỹ thuật chi tiết trình bày toàn diện kiến trúc 4 tầng Harness, cơ chế phòng ngừa 4 hiểm họa đặc trưng (Goal Drift, Infinite Loop, Tool Hallucination, State Corruption), thiết kế chi tiết 3 mẫu Agent và kết quả thực nghiệm đo lường.
