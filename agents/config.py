@@ -13,7 +13,9 @@ load_dotenv()
 class AgentConfig:
     """Configuration and guard limits for flight booking agents."""
 
-    api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    api_key: str = field(
+        default_factory=lambda: os.getenv("OPENAI_API_KEY") or "mock-api-key-for-testing"
+    )
     base_url: str = field(
         default_factory=lambda: os.getenv(
             "OPENAI_BASE_URL", "http://localhost:20128/v1"
@@ -41,7 +43,7 @@ def get_llm(config=None, **kwargs):
     Allows overriding parameters via kwargs.
     """
     cfg = config or AgentConfig()
-    api_key = kwargs.get("api_key", cfg.api_key)
+    api_key = kwargs.get("api_key") or cfg.api_key or os.getenv("OPENAI_API_KEY") or "mock-api-key-for-testing"
     base_url = kwargs.get("base_url", cfg.base_url)
     model = kwargs.get("model", cfg.model)
     temperature = kwargs.get("temperature", cfg.temperature)

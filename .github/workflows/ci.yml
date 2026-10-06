@@ -24,6 +24,8 @@ jobs:
           pip install -r requirements.txt pytest
 
       - name: Run Tool Unit Tests
+        env:
+          OPENAI_API_KEY: "mock-key-for-ci-testing"
         run: |
           chmod +x ./scripts/run_tests.sh
           ./scripts/run_tests.sh

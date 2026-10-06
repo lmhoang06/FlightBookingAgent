@@ -9,6 +9,9 @@ echo "=========================================================="
 echo "  Running FlightBookingAgent Full Test Suite (Tools + Agents)"
 echo "=========================================================="
 
+# Ensure testing environment variable fallback for OPENAI_API_KEY
+export OPENAI_API_KEY="${OPENAI_API_KEY:-mock-api-key-for-testing}"
+
 # Ensure virtualenv site-packages and project root are on PYTHONPATH
 if [ -d "$PROJECT_ROOT/venv/lib/python3.13/site-packages" ]; then
     export PYTHONPATH="$PROJECT_ROOT/venv/lib/python3.13/site-packages:$PROJECT_ROOT:$PYTHONPATH"
